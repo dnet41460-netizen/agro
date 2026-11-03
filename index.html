@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Отметь своё поле</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<style>
+  :root { --soil:#2f2a1f; --leaf:#3f7d3a; --leaf-dark:#2c5a29; --paper:#f6f4ec; --line:#d9d4c3; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--soil); }
+  body { display: flex; flex-direction: column; background: var(--paper); }
+  #map { flex: 1; min-height: 0; }
+  .panel { padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px)); background: var(--paper); border-top: 1px solid var(--line); }
+  .info { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+  .area { font-size: 28px; font-weight: 700; }
+  .area small { font-size: 15px; font-weight: 500; }
+  .hint { font-size: 14px; line-height: 1.35; margin: 0 0 10px; }
+  .row { display: flex; gap: 8px; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 12px 14px; cursor: pointer; }
+  #send { flex: 1; background: var(--leaf); color: #fff; }
+  #send:disabled { background: #a9b9a6; cursor: default; }
+  #undo, #clear { background: #e7e2d0; color: var(--soil); }
+  button:focus-visible { outline: 3px solid var(--leaf-dark); outline-offset: 2px; }
+  .layers { position: absolute; z-index: 1000; top: 10px; right: 10px; display: flex; gap: 0; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); }
+  .layers button { border-radius: 0; background: #fff; padding: 8px 12px; font-size: 13px; }
+  .layers button.on { background: var(--soil); color: #fff; }
+  .wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div id="map"></div>
+  <div class="layers">
+    <button id="bSat" class="on">Спутник</button>
+    <button id="bMap">Карта</button>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="info">
+    <div class="area"><span id="ha">0</span> <small>га</small></div>
+    <div id="pts" style="font-size:14px">точек: 0</div>
+  </div>
+  <p class="hint" id="hint">Нажимай на карте по углам своего поля. Нужно минимум 3 точки, чтобы посчитать площадь.</p>
+  <div class="row">
+    <button id="undo">Назад</button>
+    <button id="clear">Сбросить</button>
+    <button id="send" disabled>Отправить боту</button>
+  </div>
+</div>
+
+<script>
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  // Карта: старт на Петропавловске
+  const map = L.map('map', { zoomControl: false }).setView([54.87, 69.15], 10);
+  const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 18, attribution: 'Esri' });
+  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
+  sat.addTo(map);
+  L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+  const bSat = document.getElementById('bSat'), bMap = document.getElementById('bMap');
+  bSat.onclick = () => { map.removeLayer(osm); sat.addTo(map); bSat.classList.add('on'); bMap.classList.remove('on'); };
+  bMap.onclick = () => { map.removeLayer(sat); osm.addTo(map); bMap.classList.add('on'); bSat.classList.remove('on'); };
+
+  // Точки и контур
+  let pts = [];
+  const markers = L.layerGroup().addTo(map);
+  let poly = null;
+
+  // Площадь сферического многоугольника, м²
+  function areaM2(ll) {
+    if (ll.length < 3) return 0;
+    const R = 6378137, rad = Math.PI / 180;
+    let s = 0;
+    for (let i = 0; i < ll.length; i++) {
+      const a = ll[i], b = ll[(i + 1) % ll.length];
+      s += (b.lng - a.lng) * rad * (2 + Math.sin(a.lat * rad) + Math.sin(b.lat * rad));
+    }
+    return Math.abs(s * R * R / 2);
+  }
+
+  function redraw() {
+    markers.clearLayers();
+    if (poly) { map.removeLayer(poly); poly = null; }
+    pts.forEach(p => L.circleMarker(p, { radius: 6, color: '#fff', weight: 2, fillColor: '#3f7d3a', fillOpacity: 1 }).addTo(markers));
+    if (pts.length >= 2) {
+      poly = (pts.length >= 3 ? L.polygon : L.polyline)(pts, { color: '#ffd84d', weight: 3, fillOpacity: 0.2 }).addTo(map);
+    }
+    const ha = areaM2(pts) / 10000;
+    document.getElementById('ha').textContent = ha < 10 ? ha.toFixed(2) : ha.toFixed(1);
+    document.getElementById('pts').textContent = 'точек: ' + pts.length;
+    document.getElementById('send').disabled = pts.length < 3;
+    document.getElementById('hint').textContent = pts.length < 3
+      ? 'Нажимай на карте по углам своего поля. Нужно минимум 3 точки, чтобы посчитать площадь.'
+      : 'Готово. Можно добавить ещё точки или отправить поле боту.';
+  }
+
+  map.on('click', e => { pts.push(e.latlng); redraw(); });
+  document.getElementById('undo').onclick = () => { pts.pop(); redraw(); };
+  document.getElementById('clear').onclick = () => { pts = []; redraw(); };
+
+  document.getElementById('send').onclick = () => {
+    if (pts.length < 3) return;
+    const lat = pts.reduce((s, p) => s + p.lat, 0) / pts.length;
+    const lon = pts.reduce((s, p) => s + p.lng, 0) / pts.length;
+    const data = { lat: +lat.toFixed(5), lon: +lon.toFixed(5), area_ha: +(areaM2(pts) / 10000).toFixed(2) };
+    if (tg) { tg.sendData(JSON.stringify(data)); }
+    else { alert('Открыто вне Telegram. Данные: ' + JSON.stringify(data)); }
+  };
+</script>
+</body>
+</html>
